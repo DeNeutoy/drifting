@@ -1,0 +1,345 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from "preact/hooks";
+import { api } from "../api";
+import { Chart } from "../components/Chart";
+import type { ChartSeries, SeriesLink } from "../components/Chart";
+import { NavBar } from "../components/NavBar";
+import { useInterval } from "../hooks/useInterval";
+import { COLORS, POLL_INTERVAL } from "../constants";
+import type { RunSummary, MetricsResponse, MetricSeries } from "../types";
+
+interface WorkspacePageProps {
+  entity: string;
+  project: string;
+}
+
+const SYNC_KEY = "workspace";
+
+export function WorkspacePage({ entity, project }: WorkspacePageProps) {
+  const [runs, setRuns] = useState<RunSummary[] | null>(null);
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
+  const [metricsData, setMetricsData] = useState<Record<string, MetricsResponse>>({});
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [groupBy, setGroupBy] = useState<string | null>(null);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [colorOverrides, setColorOverrides] = useState<Record<string, string>>({});
+  const [colorPickerRun, setColorPickerRun] = useState<string | null>(null);
+  const [hoveredRunName, setHoveredRunName] = useState<string | null>(null);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const [metricSearch, setMetricSearch] = useState("");
+  const checkedInitialized = useRef(false);
+
+  const fetchRuns = useCallback(() => {
+    api<RunSummary[]>(`/api/runs?entity=${encodeURIComponent(entity)}&project=${encodeURIComponent(project)}`).then(
+      (data) => {
+        setRuns(data);
+        setChecked((prev) => {
+          const merged = { ...prev };
+          data.forEach((r) => {
+            if (!(r.run_id in merged)) merged[r.run_id] = true;
+          });
+          if (!checkedInitialized.current) checkedInitialized.current = true;
+          return merged;
+        });
+      },
+    );
+  }, [entity, project]);
+
+  useEffect(() => { fetchRuns(); }, [fetchRuns]);
+  useInterval(fetchRuns, POLL_INTERVAL);
+
+  const fetchMetrics = useCallback(() => {
+    if (!runs) return;
+    const checkedRuns = runs.filter((r) => checked[r.run_id]);
+    const hasLiveRuns = runs.some((r) => r.status === "running");
+    checkedRuns.forEach((r) => {
+      const needsRefresh = hasLiveRuns || !metricsData[r.run_id];
+      if (!needsRefresh) return;
+      api<MetricsResponse>(`/api/runs/${r.run_id}/metrics`).then((data) => {
+        setMetricsData((prev) => ({ ...prev, [r.run_id]: data }));
+      });
+    });
+  }, [runs, checked, metricsData]);
+
+  useEffect(() => { fetchMetrics(); }, [runs, checked]);
+  useInterval(fetchMetrics, POLL_INTERVAL);
+
+  // Derive config keys for group-by dropdown
+  const configKeys = useMemo(() => {
+    if (!runs) return [];
+    const keys = new Set<string>();
+    runs.forEach((r) => {
+      if (r.config) Object.keys(r.config).forEach((k) => keys.add(k));
+    });
+    return [...keys].sort();
+  }, [runs]);
+
+  if (!runs) return <div class="loading">Loading runs...</div>;
+
+  // Build stable run → color map
+  const runColorMap: Record<string, string> = {};
+  const nameColorMap: Record<string, string> = {};
+  runs.forEach((r, i) => {
+    const color = colorOverrides[r.run_id] || COLORS[i % COLORS.length];
+    runColorMap[r.run_id] = color;
+    nameColorMap[r.name] = color;
+  });
+
+  // Filter runs for sidebar
+  const filteredRuns = runs.filter((r) => {
+    if (search && !r.name.toLowerCase().includes(search.toLowerCase())) return false;
+    if (statusFilter !== "all" && r.status !== statusFilter) return false;
+    return true;
+  });
+
+  const checkedRuns = filteredRuns.filter((r) => checked[r.run_id]);
+
+  // Group sidebar runs
+  let sidebarGroups: { key: string; runs: RunSummary[] }[] | null = null;
+  if (groupBy) {
+    const map = new Map<string, RunSummary[]>();
+    filteredRuns.forEach((r) => {
+      const val = String(r.config?.[groupBy] ?? "—");
+      if (!map.has(val)) map.set(val, []);
+      map.get(val)!.push(r);
+    });
+    sidebarGroups = [...map.entries()].map(([key, runs]) => ({ key, runs }));
+  }
+
+  // Chart data
+  const chartKeys = new Set<string>();
+  checkedRuns.forEach((r) => {
+    const md = metricsData[r.run_id];
+    if (md?.keys) md.keys.forEach((k) => chartKeys.add(k));
+  });
+
+  let metricRegex: RegExp | null = null;
+  if (metricSearch) {
+    try { metricRegex = new RegExp(metricSearch, "i"); } catch { /* invalid regex, ignore */ }
+  }
+
+  const filteredChartKeys = metricRegex
+    ? [...chartKeys].filter((k) => metricRegex!.test(k))
+    : [...chartKeys];
+
+  const groupedCharts: Record<string, string[]> = {};
+  filteredChartKeys.sort().forEach((key) => {
+    const prefix = key.includes("/") ? key.split("/")[0] : "_ungrouped";
+    if (!groupedCharts[prefix]) groupedCharts[prefix] = [];
+    groupedCharts[prefix].push(key);
+  });
+
+  function toggleCheck(id: string) {
+    setChecked((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function toggleGroup(key: string) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function buildChartSeries(metricKey: string): { series: ChartSeries[]; links: SeriesLink[] } | null {
+    const allSteps = new Set<number>();
+    const runSeries: { runId: string; label: string; steps: number[]; values: number[] }[] = [];
+
+    checkedRuns.forEach((r) => {
+      const md = metricsData[r.run_id];
+      if (!md?.[metricKey]) return;
+      const s = md[metricKey] as MetricSeries;
+      s.steps.forEach((st) => allSteps.add(st));
+      runSeries.push({ runId: r.run_id, label: r.name, steps: s.steps, values: s.values });
+    });
+
+    if (runSeries.length === 0) return null;
+
+    const sortedSteps = [...allSteps].sort((a, b) => a - b);
+    const series: ChartSeries[] = [{ data: new Float64Array(sortedSteps) }];
+    const links: SeriesLink[] = [];
+
+    runSeries.forEach((rs) => {
+      const stepMap = new Map<number, number>();
+      rs.steps.forEach((s, i) => stepMap.set(s, rs.values[i]));
+      const data = sortedSteps.map((s) => (stepMap.has(s) ? stepMap.get(s)! : null));
+      series.push({ label: rs.label, data: data as unknown as number[] });
+      links.push({ label: rs.label, href: `#/runs/${rs.runId}`, runId: rs.runId });
+    });
+
+    return { series, links };
+  }
+
+  function renderRunItem(r: RunSummary) {
+    const color = runColorMap[r.run_id];
+    const isHovered = hoveredRunName === r.name;
+    return (
+      <div
+        class={`run-item ${isHovered ? "run-item-highlighted" : ""}`}
+        key={r.run_id}
+        onMouseEnter={() => setHoveredRunName(r.name)}
+        onMouseLeave={() => setHoveredRunName(null)}
+      >
+        <input
+          type="checkbox"
+          checked={!!checked[r.run_id]}
+          onChange={() => toggleCheck(r.run_id)}
+        />
+        <span
+          class="color-dot"
+          style={{ background: color, cursor: "pointer" }}
+          title="Click to change color"
+          onClick={() => setColorPickerRun(colorPickerRun === r.run_id ? null : r.run_id)}
+        />
+        <a href={`#/runs/${r.run_id}`} class="run-item-name">{r.name}</a>
+        <a href={`#/runs/${r.run_id}/logs`} class="run-item-logs" title="View logs">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M1 3.5A1.5 1.5 0 012.5 2h11A1.5 1.5 0 0115 3.5v9a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9zM3 5h10v1H3V5zm0 3h7v1H3V8zm0 3h10v1H3v-1z"/>
+          </svg>
+        </a>
+        {colorPickerRun === r.run_id && (
+          <div class="color-picker-popover">
+            {COLORS.map((c) => (
+              <span
+                key={c}
+                class={`color-picker-swatch ${c === color ? "selected" : ""}`}
+                style={{ background: c }}
+                onClick={() => {
+                  setColorOverrides((prev) => ({ ...prev, [r.run_id]: c }));
+                  setColorPickerRun(null);
+                }}
+              />
+            ))}
+            <input
+              type="color"
+              class="color-picker-custom"
+              value={color}
+              onChange={(e) => {
+                setColorOverrides((prev) => ({ ...prev, [r.run_id]: (e.target as HTMLInputElement).value }));
+                setColorPickerRun(null);
+              }}
+              title="Custom color"
+            />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div class="container" style={{ padding: 0 }}>
+      <div style={{ padding: "24px 24px 0" }}>
+        <NavBar entity={entity} project={project} activeTab="workspace" />
+      </div>
+      <div class="workspace-layout">
+        <div class="workspace-sidebar">
+          <input
+            type="text"
+            class="sidebar-search"
+            placeholder="Search runs..."
+            value={search}
+            onInput={(e) => setSearch((e.target as HTMLInputElement).value)}
+          />
+          <div class="sidebar-controls">
+            <select
+              class="control-btn sidebar-control-select"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter((e.target as HTMLSelectElement).value)}
+            >
+              <option value="all">All Status</option>
+              <option value="running">Running</option>
+              <option value="finished">Finished</option>
+              <option value="failed">Failed</option>
+            </select>
+            <div class="popover-anchor">
+              <button class={`control-btn sidebar-control-select ${groupBy ? "active" : ""}`} onClick={() => setGroupOpen(!groupOpen)}>
+                {groupBy ? `Group: ${groupBy}` : "Group"}
+              </button>
+              {groupOpen && (
+                <div class="popover">
+                  <div class="popover-item" onClick={() => { setGroupBy(null); setGroupOpen(false); }}>None</div>
+                  {configKeys.map((k) => (
+                    <div key={k} class="popover-item" onClick={() => { setGroupBy(k); setGroupOpen(false); }}>{k}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div class="sidebar-run-list">
+            {sidebarGroups
+              ? sidebarGroups.map((g) => (
+                  <div key={g.key}>
+                    <div class="sidebar-group-label" onClick={() => toggleGroup(g.key)}>
+                      {collapsedGroups.has(g.key) ? "▶" : "▼"} {groupBy} = {g.key} ({g.runs.length})
+                    </div>
+                    {!collapsedGroups.has(g.key) && g.runs.map(renderRunItem)}
+                  </div>
+                ))
+              : filteredRuns.map(renderRunItem)}
+          </div>
+        </div>
+        <div class="workspace-main">
+          <div class="metric-search-bar">
+            <input
+              type="text"
+              class="sidebar-search"
+              placeholder="Filter metrics (regex)..."
+              value={metricSearch}
+              onInput={(e) => setMetricSearch((e.target as HTMLInputElement).value)}
+            />
+            {metricSearch && (
+              <span class="metric-search-count">
+                {filteredChartKeys.length} / {chartKeys.size} metrics
+              </span>
+            )}
+          </div>
+          {Object.entries(groupedCharts).map(([group, keys]) => {
+            const sectionKey = group === "_ungrouped" ? "_ungrouped" : group;
+            const collapsed = collapsedSections.has(sectionKey);
+            return (
+              <div key={group}>
+                <div
+                  class="section-title section-title-collapsible"
+                  onClick={() => setCollapsedSections((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(sectionKey)) next.delete(sectionKey);
+                    else next.add(sectionKey);
+                    return next;
+                  })}
+                >
+                  <span class="section-toggle">{collapsed ? "▶" : "▼"}</span>
+                  {group === "_ungrouped" ? "Metrics" : group}
+                  <span class="section-count">{keys.length}</span>
+                </div>
+                {!collapsed && (
+                  <div class="charts-grid">
+                    {keys.map((key) => {
+                      const result = buildChartSeries(key);
+                      if (!result) return null;
+                      return (
+                        <Chart
+                          key={key}
+                          title={key}
+                          series={result.series}
+                          seriesLinks={result.links}
+                          seriesColors={nameColorMap}
+                          syncKey={SYNC_KEY}
+                          highlightedLabel={hoveredRunName}
+                          onHighlight={setHoveredRunName}
+                          titleHighlight={metricRegex}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}

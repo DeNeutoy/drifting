@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: ./serve
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./serve:/app
+      - ./fixtures:/data
+    working_dir: /app
+    command: go run . --dir /data --port 8080
+
+  ui:
+    image: node:22-alpine
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./ui:/app
+      - ui_node_modules:/app/node_modules
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    depends_on:
+      - api
+    environment:
+      - VITE_API_TARGET=http://api:8080
+
+volumes:
+  ui_node_modules:

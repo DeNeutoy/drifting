@@ -1,0 +1,14 @@
+# Build artifacts
+bin/
+serve/static/assets/
+serve/static/index.html
+serve/drifting-serve
+daemon/driftingd
+
+# Dependencies
+ui/node_modules/
+ui/dist/
+ui/tsconfig.tsbuildinfo
+
+# OS
+.DS_Store
