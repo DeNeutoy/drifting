@@ -92,15 +92,23 @@ type server struct {
 }
 
 type RunSummary struct {
-	RunID          string            `json:"run_id"`
-	Name           string            `json:"name"`
-	Entity         string            `json:"entity"`
-	Project        string            `json:"project"`
-	Status         string            `json:"status"`
-	Config         json.RawMessage   `json:"config"`
-	StartTime      float64           `json:"start_time"`
-	EndTime        float64           `json:"end_time,omitempty"`
-	SummaryMetrics map[string]float64 `json:"summary_metrics"`
+	RunID             string                `json:"run_id"`
+	Name              string                `json:"name"`
+	Entity            string                `json:"entity"`
+	Project           string                `json:"project"`
+	Status            string                `json:"status"`
+	Config            json.RawMessage       `json:"config"`
+	StartTime         float64               `json:"start_time"`
+	EndTime           float64               `json:"end_time,omitempty"`
+	SummaryMetrics    map[string]float64     `json:"summary_metrics"`
+	MetricDefinitions []MetricDefinition     `json:"metric_definitions,omitempty"`
+}
+
+type MetricDefinition struct {
+	Name       string `json:"name"`
+	StepMetric string `json:"step_metric,omitempty"`
+	Summary    string `json:"summary,omitempty"`
+	Objective  string `json:"objective,omitempty"`
 }
 
 type ProjectSummary struct {
@@ -188,11 +196,19 @@ func (s *server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch parts[1] {
-	case "metrics":
+	sub := parts[1]
+	switch {
+	case sub == "metrics":
 		s.handleMetrics(w, r, runID)
-	case "logs":
+	case sub == "logs":
 		s.handleLogs(w, r, runID)
+	case sub == "system":
+		s.handleSystemMetrics(w, r, runID)
+	case sub == "media":
+		s.handleMediaList(w, r, runID)
+	case strings.HasPrefix(sub, "media/"):
+		mediaID := strings.TrimPrefix(sub, "media/")
+		s.handleMediaBlob(w, r, runID, mediaID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -218,12 +234,12 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request, runID str
 			args[i] = k
 		}
 		query := fmt.Sprintf(
-			"SELECT step, key, value FROM metrics WHERE key IN (%s) ORDER BY step, key",
+			"SELECT step, key, value, timestamp FROM metrics WHERE key IN (%s) ORDER BY step, key",
 			strings.Join(placeholders, ","),
 		)
 		rows, err = db.Query(query, args...)
 	} else {
-		rows, err = db.Query("SELECT step, key, value FROM metrics ORDER BY step, key")
+		rows, err = db.Query("SELECT step, key, value, timestamp FROM metrics ORDER BY step, key")
 	}
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -231,10 +247,10 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request, runID str
 	}
 	defer rows.Close()
 
-	// Build columnar format: {steps: [...], "key1": [...], "key2": [...]}
 	type point struct {
-		step  int
-		value float64
+		step      int
+		value     float64
+		timestamp float64
 	}
 	keyData := make(map[string][]point)
 	var allKeys []string
@@ -243,13 +259,13 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request, runID str
 	for rows.Next() {
 		var step int
 		var key string
-		var value float64
-		rows.Scan(&step, &key, &value)
+		var value, timestamp float64
+		rows.Scan(&step, &key, &value, &timestamp)
 		if !keySet[key] {
 			keySet[key] = true
 			allKeys = append(allKeys, key)
 		}
-		keyData[key] = append(keyData[key], point{step, value})
+		keyData[key] = append(keyData[key], point{step, value, timestamp})
 	}
 	sort.Strings(allKeys)
 
@@ -260,13 +276,16 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request, runID str
 		points := keyData[key]
 		steps := make([]int, len(points))
 		values := make([]float64, len(points))
+		timestamps := make([]float64, len(points))
 		for i, p := range points {
 			steps[i] = p.step
 			values[i] = p.value
+			timestamps[i] = p.timestamp
 		}
 		result[key] = map[string]interface{}{
-			"steps":  steps,
-			"values": values,
+			"steps":      steps,
+			"values":     values,
+			"timestamps": timestamps,
 		}
 	}
 
@@ -368,29 +387,59 @@ func (s *server) loadRunSummary(runDir string) (*RunSummary, error) {
 		info[k] = v
 	}
 
+	// Read summary: prefer the summary table, fall back to last-value-per-key
 	summary := make(map[string]float64)
-	metricRows, err := db.Query(`
-		SELECT m.key, m.value FROM metrics m
-		INNER JOIN (SELECT key, MAX(step) as max_step FROM metrics GROUP BY key) latest
-		ON m.key = latest.key AND m.step = latest.max_step
-	`)
+	summaryRows, err := db.Query("SELECT key, value FROM summary")
 	if err == nil {
-		defer metricRows.Close()
-		for metricRows.Next() {
+		defer summaryRows.Close()
+		for summaryRows.Next() {
 			var k string
 			var v float64
-			metricRows.Scan(&k, &v)
+			summaryRows.Scan(&k, &v)
 			summary[k] = v
+		}
+	}
+	if len(summary) == 0 {
+		metricRows, err := db.Query(`
+			SELECT m.key, m.value FROM metrics m
+			INNER JOIN (SELECT key, MAX(step) as max_step FROM metrics GROUP BY key) latest
+			ON m.key = latest.key AND m.step = latest.max_step
+		`)
+		if err == nil {
+			defer metricRows.Close()
+			for metricRows.Next() {
+				var k string
+				var v float64
+				metricRows.Scan(&k, &v)
+				summary[k] = v
+			}
+		}
+	}
+
+	// Read metric definitions if available
+	var metricDefs []MetricDefinition
+	defRows, err := db.Query("SELECT name, step_metric, summary, objective FROM metric_definitions")
+	if err == nil {
+		defer defRows.Close()
+		for defRows.Next() {
+			var d MetricDefinition
+			var stepMetric, summaryType, objective sql.NullString
+			defRows.Scan(&d.Name, &stepMetric, &summaryType, &objective)
+			d.StepMetric = stepMetric.String
+			d.Summary = summaryType.String
+			d.Objective = objective.String
+			metricDefs = append(metricDefs, d)
 		}
 	}
 
 	run := &RunSummary{
-		RunID:          info["run_id"],
-		Name:           info["name"],
-		Entity:         info["entity"],
-		Project:        info["project"],
-		Status:         info["status"],
-		SummaryMetrics: summary,
+		RunID:             info["run_id"],
+		Name:              info["name"],
+		Entity:            info["entity"],
+		Project:           info["project"],
+		Status:            info["status"],
+		SummaryMetrics:    summary,
+		MetricDefinitions: metricDefs,
 	}
 
 	if t, err := strconv.ParseFloat(info["start_time"], 64); err == nil {
@@ -442,6 +491,147 @@ func (s *server) openDB(runID string) (*sql.DB, error) {
 		return nil, fmt.Errorf("run %s not found", runID)
 	}
 	return sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
+}
+
+func (s *server) handleSystemMetrics(w http.ResponseWriter, r *http.Request, runID string) {
+	db, err := s.openDB(runID)
+	if err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT timestamp, key, value FROM system_metrics ORDER BY timestamp, key")
+	if err != nil {
+		// Table may not exist in older DBs
+		writeJSON(w, map[string]interface{}{"keys": []string{}})
+		return
+	}
+	defer rows.Close()
+
+	type point struct {
+		timestamp float64
+		value     float64
+	}
+	keyData := make(map[string][]point)
+	var allKeys []string
+	keySet := make(map[string]bool)
+
+	for rows.Next() {
+		var timestamp, value float64
+		var key string
+		rows.Scan(&timestamp, &key, &value)
+		if !keySet[key] {
+			keySet[key] = true
+			allKeys = append(allKeys, key)
+		}
+		keyData[key] = append(keyData[key], point{timestamp, value})
+	}
+	sort.Strings(allKeys)
+
+	result := make(map[string]interface{})
+	result["keys"] = allKeys
+
+	for _, key := range allKeys {
+		points := keyData[key]
+		timestamps := make([]float64, len(points))
+		values := make([]float64, len(points))
+		for i, p := range points {
+			timestamps[i] = p.timestamp
+			values[i] = p.value
+		}
+		result[key] = map[string]interface{}{
+			"timestamps": timestamps,
+			"values":     values,
+		}
+	}
+
+	writeJSON(w, result)
+}
+
+func (s *server) handleMediaList(w http.ResponseWriter, r *http.Request, runID string) {
+	db, err := s.openDB(runID)
+	if err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.Query(
+		"SELECT id, step, key, media_type, width, height, metadata, created_at FROM media ORDER BY step, key",
+	)
+	if err != nil {
+		writeJSON(w, []interface{}{})
+		return
+	}
+	defer rows.Close()
+
+	type MediaItem struct {
+		ID        int              `json:"id"`
+		Step      int              `json:"step"`
+		Key       string           `json:"key"`
+		MediaType string           `json:"media_type"`
+		Width     *int             `json:"width"`
+		Height    *int             `json:"height"`
+		Metadata  *json.RawMessage `json:"metadata"`
+		CreatedAt float64          `json:"created_at"`
+	}
+
+	var items []MediaItem
+	for rows.Next() {
+		var m MediaItem
+		var width, height sql.NullInt64
+		var metaStr sql.NullString
+		rows.Scan(&m.ID, &m.Step, &m.Key, &m.MediaType, &width, &height, &metaStr, &m.CreatedAt)
+		if width.Valid {
+			w := int(width.Int64)
+			m.Width = &w
+		}
+		if height.Valid {
+			h := int(height.Int64)
+			m.Height = &h
+		}
+		if metaStr.Valid {
+			raw := json.RawMessage(metaStr.String)
+			m.Metadata = &raw
+		}
+		items = append(items, m)
+	}
+	if items == nil {
+		items = []MediaItem{}
+	}
+	writeJSON(w, items)
+}
+
+func (s *server) handleMediaBlob(w http.ResponseWriter, r *http.Request, runID string, mediaID string) {
+	id, err := strconv.Atoi(mediaID)
+	if err != nil {
+		http.Error(w, "invalid media id", 400)
+		return
+	}
+
+	db, err := s.openDB(runID)
+	if err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	defer db.Close()
+
+	var mediaType string
+	var data []byte
+	err = db.QueryRow("SELECT media_type, data FROM media WHERE id = ?", id).Scan(&mediaType, &data)
+	if err != nil {
+		http.Error(w, "media not found", 404)
+		return
+	}
+
+	if strings.HasSuffix(mediaType, "+json") {
+		w.Header().Set("Content-Type", "application/json")
+	} else {
+		w.Header().Set("Content-Type", mediaType)
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data)
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

@@ -32,3 +32,24 @@ export interface LogEntry {
   stream: "stdout" | "stderr";
   line: string;
 }
+
+export interface SystemMetricSeries {
+  timestamps: number[];
+  values: number[];
+}
+
+export interface SystemMetricsResponse {
+  keys: string[];
+  [metricKey: string]: SystemMetricSeries | string[];
+}
+
+export interface MediaItem {
+  id: number;
+  step: number;
+  key: string;
+  media_type: string;
+  width: number | null;
+  height: number | null;
+  metadata: Record<string, unknown> | null;
+  created_at: number;
+}

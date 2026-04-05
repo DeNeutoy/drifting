@@ -190,6 +190,15 @@ a:hover { text-decoration: underline; }
 .meta-grid .label { color: var(--text-dim); }
 
 .loading { text-align: center; padding: 40px; color: var(--text-dim); }
+.not-found {
+  text-align: center; padding: 60px 20px; color: var(--text-dim);
+}
+.not-found h2 { color: var(--text); margin-bottom: 8px; font-weight: 600; }
+.not-found p { margin-bottom: 16px; }
+.not-found code {
+  background: var(--bg-card); padding: 2px 6px; border-radius: 4px;
+  font-size: 13px; color: var(--text);
+}
 
 /* Projects page */
 .projects-grid {
@@ -368,6 +377,70 @@ a.chart-legend-label:hover { text-decoration: underline; }
 .color-picker-custom {
   width: 20px; height: 20px; border: none; padding: 0;
   background: none; cursor: pointer; border-radius: 4px;
+}
+
+/* Media */
+.media-section-title {
+  font-size: 14px; font-weight: 500; color: var(--text);
+  padding: 8px 16px 12px;
+}
+
+/* Media grid */
+.media-grid {
+  display: flex; flex-wrap: wrap;
+  gap: 20px;
+  padding: 0 16px 24px;
+}
+.media-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  display: inline-flex; flex-direction: column;
+  min-width: 200px; max-width: 100%;
+}
+.media-card-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+.media-card-step {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  background: var(--bg); padding: 2px 8px; border-radius: 4px;
+  font-size: 11px;
+}
+.media-card-caption {
+  color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px;
+}
+.media-card-body {
+  padding: 4px 14px 14px;
+  display: flex; justify-content: center;
+}
+.media-card-body img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  background: #1a1a2e;
+}
+.media-card-slider {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px 12px;
+}
+.media-card-slider input[type="range"] {
+  flex: 1; height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.media-card-slider-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 36px; text-align: right;
 }
 
 /* uPlot overrides for dark theme */

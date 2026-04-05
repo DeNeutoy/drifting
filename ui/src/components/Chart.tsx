@@ -23,6 +23,7 @@ interface ChartProps {
   highlightedLabel?: string | null;
   onHighlight?: (label: string | null) => void;
   titleHighlight?: RegExp | null;
+  timeAxis?: boolean;
 }
 
 function renderHighlightedTitle(title: string, regex: RegExp | null | undefined) {
@@ -35,7 +36,7 @@ function renderHighlightedTitle(title: string, regex: RegExp | null | undefined)
   return <>{before}<mark class="metric-match">{matched}</mark>{after}</>;
 }
 
-export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors, highlightedLabel, onHighlight, titleHighlight }: ChartProps) {
+export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors, highlightedLabel, onHighlight, titleHighlight, timeAxis }: ChartProps) {
   const el = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
 
@@ -57,16 +58,14 @@ export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors
         ...(syncKey ? { sync: { key: syncKey } } : {}),
       },
       focus: { alpha: 0.3 },
-      scales: { x: { time: false } },
+      scales: { x: { time: !!timeAxis } },
       axes: [
         {
           stroke: "#8b949e",
           grid: { stroke: "rgba(48,54,61,0.6)", width: 1 },
           font: "11px -apple-system, sans-serif",
           ticks: { stroke: "rgba(48,54,61,0.6)" },
-          label: "step",
-          labelFont: "11px -apple-system, sans-serif",
-          labelSize: 20,
+          ...(!timeAxis ? { label: "step", labelFont: "11px -apple-system, sans-serif", labelSize: 20 } : {}),
         },
         {
           stroke: "#8b949e",
@@ -82,6 +81,7 @@ export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors
           label: s.label || "",
           stroke: colorForIndex(i, s.label),
           width: 1.5,
+          spanGaps: !!timeAxis,
         })),
       ],
     };
@@ -93,7 +93,7 @@ export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors
     return () => {
       if (chartRef.current) chartRef.current.destroy();
     };
-  }, [series, width, syncKey, seriesColors]);
+  }, [series, width, syncKey, seriesColors, timeAxis]);
 
   // Apply focus when highlightedLabel changes
   useEffect(() => {

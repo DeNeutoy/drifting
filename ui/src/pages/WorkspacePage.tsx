@@ -5,7 +5,7 @@ import type { ChartSeries, SeriesLink } from "../components/Chart";
 import { NavBar } from "../components/NavBar";
 import { useInterval } from "../hooks/useInterval";
 import { COLORS, POLL_INTERVAL } from "../constants";
-import type { RunSummary, MetricsResponse, MetricSeries } from "../types";
+import type { RunSummary, MetricsResponse, MetricSeries, SystemMetricsResponse, SystemMetricSeries } from "../types";
 
 interface WorkspacePageProps {
   entity: string;
@@ -28,12 +28,16 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
   const [hoveredRunName, setHoveredRunName] = useState<string | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [metricSearch, setMetricSearch] = useState("");
+  const [systemData, setSystemData] = useState<Record<string, SystemMetricsResponse>>({});
   const checkedInitialized = useRef(false);
+
+  const [notFound, setNotFound] = useState(false);
 
   const fetchRuns = useCallback(() => {
     api<RunSummary[]>(`/api/runs?entity=${encodeURIComponent(entity)}&project=${encodeURIComponent(project)}`).then(
       (data) => {
         setRuns(data);
+        if (data.length === 0) setNotFound(true);
         setChecked((prev) => {
           const merged = { ...prev };
           data.forEach((r) => {
@@ -43,7 +47,7 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
           return merged;
         });
       },
-    );
+    ).catch(() => setNotFound(true));
   }, [entity, project]);
 
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
@@ -59,8 +63,13 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
       api<MetricsResponse>(`/api/runs/${r.run_id}/metrics`).then((data) => {
         setMetricsData((prev) => ({ ...prev, [r.run_id]: data }));
       });
+      if (!systemData[r.run_id]) {
+        api<SystemMetricsResponse>(`/api/runs/${r.run_id}/system`).then((data) => {
+          setSystemData((prev) => ({ ...prev, [r.run_id]: data }));
+        }).catch(() => {});
+      }
     });
-  }, [runs, checked, metricsData]);
+  }, [runs, checked, metricsData, systemData]);
 
   useEffect(() => { fetchMetrics(); }, [runs, checked]);
   useInterval(fetchMetrics, POLL_INTERVAL);
@@ -74,6 +83,19 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
     });
     return [...keys].sort();
   }, [runs]);
+
+  if (notFound) {
+    return (
+      <div class="container">
+        <NavBar />
+        <div class="not-found">
+          <h2>Project not found</h2>
+          <p>No runs found for <code>{entity}/{project}</code>.</p>
+          <a href="#/">Back to projects</a>
+        </div>
+      </div>
+    );
+  }
 
   if (!runs) return <div class="loading">Loading runs...</div>;
 
@@ -141,6 +163,65 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
       else next.add(key);
       return next;
     });
+  }
+
+  // System metrics: collect all keys across checked runs
+  const systemChartKeys = new Set<string>();
+  checkedRuns.forEach((r) => {
+    const sd = systemData[r.run_id];
+    if (sd?.keys) sd.keys.forEach((k) => systemChartKeys.add(k));
+  });
+
+  const systemGroups: Record<string, string[]> = {};
+  [...systemChartKeys].sort().forEach((key) => {
+    let group: string;
+    if (key.startsWith("gpu.")) {
+      const gpuIdx = key.split("/")[0];
+      group = `GPU ${gpuIdx.replace("gpu.", "")}`;
+    } else if (key.startsWith("cpu")) {
+      group = "CPU";
+    } else if (key.startsWith("memory")) {
+      group = "Memory";
+    } else if (key.startsWith("disk")) {
+      group = "Disk";
+    } else {
+      group = "System";
+    }
+    if (!systemGroups[group]) systemGroups[group] = [];
+    systemGroups[group].push(key);
+  });
+
+  function buildSystemChartSeries(metricKey: string): { series: ChartSeries[]; links: SeriesLink[] } | null {
+    const runSeries: { runId: string; label: string; timestamps: number[]; values: number[] }[] = [];
+
+    checkedRuns.forEach((r) => {
+      const sd = systemData[r.run_id];
+      if (!sd?.[metricKey]) return;
+      const s = sd[metricKey] as SystemMetricSeries;
+      if (!s.timestamps || s.timestamps.length === 0) return;
+      runSeries.push({ runId: r.run_id, label: r.name, timestamps: s.timestamps, values: s.values });
+    });
+
+    if (runSeries.length === 0) return null;
+
+    const allTimestamps = new Set<number>();
+    runSeries.forEach((rs) => {
+      rs.timestamps.forEach((t) => allTimestamps.add(t));
+    });
+
+    const sortedTs = [...allTimestamps].sort((a, b) => a - b);
+    const series: ChartSeries[] = [{ data: new Float64Array(sortedTs) }];
+    const links: SeriesLink[] = [];
+
+    runSeries.forEach((rs) => {
+      const tsMap = new Map<number, number>();
+      rs.timestamps.forEach((t, i) => tsMap.set(t, rs.values[i]));
+      const data = sortedTs.map((t) => (tsMap.has(t) ? tsMap.get(t)! : null));
+      series.push({ label: rs.label, data: data as unknown as number[] });
+      links.push({ label: rs.label, href: `#/runs/${rs.runId}`, runId: rs.runId });
+    });
+
+    return { series, links };
   }
 
   function buildChartSeries(metricKey: string): { series: ChartSeries[]; links: SeriesLink[] } | null {
@@ -338,6 +419,48 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
               </div>
             );
           })}
+          {systemChartKeys.size > 0 && (() => {
+            const sectionKey = "system";
+            const collapsed = collapsedSections.has(sectionKey);
+            const allSystemKeys = [...systemChartKeys].sort();
+            return (
+              <div key={sectionKey}>
+                <div
+                  class="section-title section-title-collapsible"
+                  onClick={() => setCollapsedSections((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(sectionKey)) next.delete(sectionKey);
+                    else next.add(sectionKey);
+                    return next;
+                  })}
+                >
+                  <span class="section-toggle">{collapsed ? "▶" : "▼"}</span>
+                  System
+                  <span class="section-count">{allSystemKeys.length}</span>
+                </div>
+                {!collapsed && (
+                  <div class="charts-grid">
+                    {allSystemKeys.map((key) => {
+                      const result = buildSystemChartSeries(key);
+                      if (!result) return null;
+                      return (
+                        <Chart
+                          key={key}
+                          title={key}
+                          series={result.series}
+                          seriesLinks={result.links}
+                          seriesColors={nameColorMap}
+                          highlightedLabel={hoveredRunName}
+                          onHighlight={setHoveredRunName}
+                          timeAxis
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>

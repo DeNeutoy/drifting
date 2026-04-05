@@ -5,27 +5,34 @@ import { NavBar } from "../components/NavBar";
 import { useInterval } from "../hooks/useInterval";
 import { formatDuration, formatTime } from "../format";
 import { POLL_INTERVAL } from "../constants";
-import type { RunSummary, MetricsResponse, MetricSeries, LogEntry } from "../types";
+import { MediaPanel } from "../components/MediaPanel";
+import type { RunSummary, MetricsResponse, MetricSeries, LogEntry, SystemMetricsResponse, SystemMetricSeries, MediaItem } from "../types";
 
 interface RunDetailPageProps {
   runId: string;
-  initialTab?: "charts" | "logs" | "config";
+  initialTab?: "charts" | "logs" | "config" | "media";
 }
 
 export function RunDetailPage({ runId, initialTab = "charts" }: RunDetailPageProps) {
   const [run, setRun] = useState<RunSummary | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [logs, setLogs] = useState<LogEntry[] | null>(null);
-  const [tab, setTab] = useState<"charts" | "logs" | "config">(initialTab);
+  const [systemMetrics, setSystemMetrics] = useState<SystemMetricsResponse | null>(null);
+  const [media, setMedia] = useState<MediaItem[]>([]);
+  const [tab, setTab] = useState<"charts" | "logs" | "config" | "media">(initialTab);
   const [logStream, setLogStream] = useState("all");
   const [logSearch, setLogSearch] = useState("");
+  const [systemCollapsed, setSystemCollapsed] = useState(false);
 
   const isLive = run?.status === "running";
 
   const fetchAll = useCallback(() => {
-    api<RunSummary>(`/api/runs/${runId}`).then(setRun);
-    api<MetricsResponse>(`/api/runs/${runId}/metrics`).then(setMetrics);
-    api<LogEntry[]>(`/api/runs/${runId}/logs?limit=5000`).then(setLogs);
+    api<RunSummary>(`/api/runs/${runId}`).then(setRun).catch(() => setNotFound(true));
+    api<MetricsResponse>(`/api/runs/${runId}/metrics`).then(setMetrics).catch(() => {});
+    api<LogEntry[]>(`/api/runs/${runId}/logs?limit=5000`).then(setLogs).catch(() => {});
+    api<SystemMetricsResponse>(`/api/runs/${runId}/system`).then(setSystemMetrics).catch(() => {});
+    api<MediaItem[]>(`/api/runs/${runId}/media`).then(setMedia).catch(() => {});
   }, [runId]);
 
   useEffect(() => {
@@ -41,6 +48,19 @@ export function RunDetailPage({ runId, initialTab = "charts" }: RunDetailPagePro
       return true;
     });
   }, [logs, logStream, logSearch]);
+
+  if (notFound) {
+    return (
+      <div class="container">
+        <NavBar />
+        <div class="not-found">
+          <h2>Run not found</h2>
+          <p>No run with ID <code>{runId}</code> exists.</p>
+          <a href="#/">Back to projects</a>
+        </div>
+      </div>
+    );
+  }
 
   if (!run) return <div class="loading">Loading...</div>;
 
@@ -60,6 +80,9 @@ export function RunDetailPage({ runId, initialTab = "charts" }: RunDetailPagePro
     });
   }
 
+  const systemKeys = systemMetrics?.keys ? [...systemMetrics.keys].sort() : [];
+  const hasSystemMetrics = systemKeys.length > 0;
+
   return (
     <div class="container">
       <NavBar entity={run.entity} project={run.project} runName={run.name} />
@@ -74,25 +97,56 @@ export function RunDetailPage({ runId, initialTab = "charts" }: RunDetailPagePro
         <button class={`tab ${tab === "config" ? "active" : ""}`} onClick={() => setTab("config")}>
           Config
         </button>
+        <button class={`tab ${tab === "media" ? "active" : ""}`} onClick={() => setTab("media")}>
+          Media{media.length > 0 ? ` (${media.length})` : ""}
+        </button>
       </div>
 
-      {tab === "charts" &&
-        Object.entries(groupedCharts).map(([group, keys]) => (
-          <div key={group}>
-            {group !== "_ungrouped" && <div class="section-title">{group}</div>}
-            <div class="charts-grid">
-              {keys.map((key) => {
-                const d = metrics![key] as MetricSeries | undefined;
-                if (!d) return null;
-                const series = [
-                  { data: new Float64Array(d.steps) },
-                  { label: key, data: d.values },
-                ];
-                return <Chart key={key} title={key} series={series} />;
-              })}
+      {tab === "charts" && (
+        <>
+          {Object.entries(groupedCharts).map(([group, keys]) => (
+            <div key={group}>
+              {group !== "_ungrouped" && <div class="section-title">{group}</div>}
+              <div class="charts-grid">
+                {keys.map((key) => {
+                  const d = metrics![key] as MetricSeries | undefined;
+                  if (!d) return null;
+                  const series = [
+                    { data: new Float64Array(d.steps) },
+                    { label: key, data: d.values },
+                  ];
+                  return <Chart key={key} title={key} series={series} />;
+                })}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+          {hasSystemMetrics && (
+            <div>
+              <div
+                class="section-title"
+                style={{ cursor: "pointer", userSelect: "none" }}
+                onClick={() => setSystemCollapsed((c) => !c)}
+              >
+                <span style={{ display: "inline-block", width: "16px" }}>{systemCollapsed ? "▶" : "▼"}</span>
+                System
+              </div>
+              {!systemCollapsed && (
+                <div class="charts-grid">
+                  {systemKeys.map((key) => {
+                    const d = systemMetrics![key] as SystemMetricSeries | undefined;
+                    if (!d || !d.timestamps || d.timestamps.length === 0) return null;
+                    const series = [
+                      { data: d.timestamps },
+                      { label: key, data: d.values },
+                    ];
+                    return <Chart key={key} title={key} series={series} timeAxis />;
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
 
       {tab === "logs" && (
         <div class="logs-container">
@@ -160,6 +214,8 @@ export function RunDetailPage({ runId, initialTab = "charts" }: RunDetailPagePro
           )}
         </div>
       )}
+
+      {tab === "media" && <MediaPanel runId={runId} media={media} />}
     </div>
   );
 }

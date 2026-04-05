@@ -25,10 +25,15 @@ export function RunsTablePage({ entity, project }: RunsTablePageProps) {
   const [groupOpen, setGroupOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
+  const [notFound, setNotFound] = useState(false);
+
   const fetchRuns = useCallback(() => {
     api<RunSummary[]>(
       `/api/runs?entity=${encodeURIComponent(entity)}&project=${encodeURIComponent(project)}`,
-    ).then(setRuns);
+    ).then((data) => {
+      setRuns(data);
+      if (data.length === 0) setNotFound(true);
+    }).catch(() => setNotFound(true));
   }, [entity, project]);
 
   useEffect(() => {
@@ -54,6 +59,19 @@ export function RunsTablePage({ entity, project }: RunsTablePageProps) {
       setVisibleCols(new Set(metricCols.slice(0, 6)));
     }
   }, [allCols, visibleCols, metricCols]);
+
+  if (notFound) {
+    return (
+      <div class="container">
+        <NavBar />
+        <div class="not-found">
+          <h2>Project not found</h2>
+          <p>No runs found for <code>{entity}/{project}</code>.</p>
+          <a href="#/">Back to projects</a>
+        </div>
+      </div>
+    );
+  }
 
   if (!runs) return <div class="loading">Loading runs...</div>;
 
