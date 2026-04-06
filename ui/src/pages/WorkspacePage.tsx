@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "preact/hooks"
 import { api } from "../api";
 import { Chart } from "../components/Chart";
 import type { ChartSeries, SeriesLink } from "../components/Chart";
+import { LayoutPicker } from "../components/LayoutPicker";
+import type { ChartLayout } from "../components/LayoutPicker";
 import { NavBar } from "../components/NavBar";
 import { useInterval } from "../hooks/useInterval";
 import { COLORS, POLL_INTERVAL } from "../constants";
@@ -29,9 +31,48 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [metricSearch, setMetricSearch] = useState("");
   const [systemData, setSystemData] = useState<Record<string, SystemMetricsResponse>>({});
+  const [hiddenCharts, setHiddenCharts] = useState<Set<string>>(new Set());
+  const [panelsOpen, setPanelsOpen] = useState(false);
+  const panelsRef = useRef<HTMLDivElement>(null);
+  const [globalLayout, setGlobalLayout] = useState<ChartLayout>({ cols: 2, rows: 1 });
+  const [sectionLayouts, setSectionLayouts] = useState<Record<string, ChartLayout>>({});
+  const [sectionPages, setSectionPages] = useState<Record<string, number>>({});
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(260);
   const checkedInitialized = useRef(false);
 
   const [notFound, setNotFound] = useState(false);
+
+  useEffect(() => {
+    if (!panelsOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (panelsRef.current && !panelsRef.current.contains(e.target as Node)) {
+        setPanelsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [panelsOpen]);
+
+  const onSidebarResizeStart = useCallback((e: MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarRef.current?.offsetWidth ?? sidebarWidth;
+    const handle = e.currentTarget as HTMLElement;
+    handle.classList.add("dragging");
+
+    const onMove = (ev: MouseEvent) => {
+      const newW = Math.max(180, Math.min(startW + ev.clientX - startX, window.innerWidth * 0.5));
+      setSidebarWidth(newW);
+    };
+    const onUp = () => {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [sidebarWidth]);
 
   const fetchRuns = useCallback(() => {
     api<RunSummary[]>(`/api/runs?entity=${encodeURIComponent(entity)}&project=${encodeURIComponent(project)}`).then(
@@ -141,9 +182,9 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
     try { metricRegex = new RegExp(metricSearch, "i"); } catch { /* invalid regex, ignore */ }
   }
 
-  const filteredChartKeys = metricRegex
-    ? [...chartKeys].filter((k) => metricRegex!.test(k))
-    : [...chartKeys];
+  const filteredChartKeys = [...chartKeys]
+    .filter((k) => !hiddenCharts.has(k))
+    .filter((k) => !metricRegex || metricRegex.test(k));
 
   const groupedCharts: Record<string, string[]> = {};
   filteredChartKeys.sort().forEach((key) => {
@@ -315,7 +356,8 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
         <NavBar entity={entity} project={project} activeTab="workspace" />
       </div>
       <div class="workspace-layout">
-        <div class="workspace-sidebar">
+        <div class="workspace-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
+          <div class="sidebar-resize-handle" onMouseDown={onSidebarResizeStart} />
           <input
             type="text"
             class="sidebar-search"
@@ -376,10 +418,51 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
                 {filteredChartKeys.length} / {chartKeys.size} metrics
               </span>
             )}
+            <LayoutPicker value={globalLayout} onChange={setGlobalLayout} />
+            <div class="popover-anchor" ref={panelsRef}>
+              <button
+                class={`control-btn ${hiddenCharts.size > 0 ? "active" : ""}`}
+                onClick={() => setPanelsOpen(!panelsOpen)}
+              >
+                Panels{hiddenCharts.size > 0 ? ` (${hiddenCharts.size} hidden)` : ""}
+              </button>
+              {panelsOpen && (() => {
+                const allKeys = [...new Set([...chartKeys, ...systemChartKeys])].sort();
+                return (
+                  <div class="popover panels-popover">
+                    <div
+                      class="popover-item panels-show-all"
+                      onClick={() => setHiddenCharts(new Set())}
+                    >
+                      Show all
+                    </div>
+                    {allKeys.map((k) => (
+                      <div key={k} class="popover-item" onClick={() => {
+                        setHiddenCharts((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(k)) next.delete(k);
+                          else next.add(k);
+                          return next;
+                        });
+                      }}>
+                        <input type="checkbox" checked={!hiddenCharts.has(k)} readOnly />
+                        <span class="panels-metric-label">{k}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
           </div>
           {Object.entries(groupedCharts).map(([group, keys]) => {
             const sectionKey = group === "_ungrouped" ? "_ungrouped" : group;
             const collapsed = collapsedSections.has(sectionKey);
+            const layout = sectionLayouts[sectionKey] ?? globalLayout;
+            const pageSize = layout.cols * layout.rows;
+            const page = sectionPages[sectionKey] ?? 0;
+            const totalPages = Math.ceil(keys.length / pageSize);
+            const clampedPage = Math.min(page, totalPages - 1);
+            const pageKeys = keys.slice(clampedPage * pageSize, (clampedPage + 1) * pageSize);
             return (
               <div key={group}>
                 <div
@@ -394,27 +477,46 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
                   <span class="section-toggle">{collapsed ? "▶" : "▼"}</span>
                   {group === "_ungrouped" ? "Metrics" : group}
                   <span class="section-count">{keys.length}</span>
+                  {!collapsed && (
+                    <span class="section-layout-wrap" onClick={(e) => e.stopPropagation()}>
+                      <LayoutPicker
+                        compact
+                        value={layout}
+                        onChange={(l) => setSectionLayouts((prev) => ({ ...prev, [sectionKey]: l }))}
+                      />
+                    </span>
+                  )}
                 </div>
                 {!collapsed && (
-                  <div class="charts-grid">
-                    {keys.map((key) => {
-                      const result = buildChartSeries(key);
-                      if (!result) return null;
-                      return (
-                        <Chart
-                          key={key}
-                          title={key}
-                          series={result.series}
-                          seriesLinks={result.links}
-                          seriesColors={nameColorMap}
-                          syncKey={SYNC_KEY}
-                          highlightedLabel={hoveredRunName}
-                          onHighlight={setHoveredRunName}
-                          titleHighlight={metricRegex}
-                        />
-                      );
-                    })}
-                  </div>
+                  <>
+                    <div class="charts-grid" style={{ gridTemplateColumns: `repeat(${layout.cols}, 1fr)` }}>
+                      {pageKeys.map((key) => {
+                        const result = buildChartSeries(key);
+                        if (!result) return null;
+                        return (
+                          <Chart
+                            key={key}
+                            title={key}
+                            series={result.series}
+                            seriesLinks={result.links}
+                            seriesColors={nameColorMap}
+                            syncKey={SYNC_KEY}
+                            highlightedLabel={hoveredRunName}
+                            onHighlight={setHoveredRunName}
+                            titleHighlight={metricRegex}
+                            onHide={() => setHiddenCharts((prev) => new Set(prev).add(key))}
+                          />
+                        );
+                      })}
+                    </div>
+                    {totalPages > 1 && (
+                      <div class="charts-pagination">
+                        <button disabled={clampedPage === 0} onClick={() => setSectionPages((p) => ({ ...p, [sectionKey]: clampedPage - 1 }))}>Prev</button>
+                        <span>{clampedPage + 1} / {totalPages}</span>
+                        <button disabled={clampedPage >= totalPages - 1} onClick={() => setSectionPages((p) => ({ ...p, [sectionKey]: clampedPage + 1 }))}>Next</button>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             );
@@ -422,7 +524,13 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
           {systemChartKeys.size > 0 && (() => {
             const sectionKey = "system";
             const collapsed = collapsedSections.has(sectionKey);
-            const allSystemKeys = [...systemChartKeys].sort();
+            const allSystemKeys = [...systemChartKeys].filter((k) => !hiddenCharts.has(k)).sort();
+            const layout = sectionLayouts[sectionKey] ?? globalLayout;
+            const pageSize = layout.cols * layout.rows;
+            const page = sectionPages[sectionKey] ?? 0;
+            const totalPages = Math.ceil(allSystemKeys.length / pageSize);
+            const clampedPage = Math.min(page, Math.max(0, totalPages - 1));
+            const pageKeys = allSystemKeys.slice(clampedPage * pageSize, (clampedPage + 1) * pageSize);
             return (
               <div key={sectionKey}>
                 <div
@@ -437,26 +545,45 @@ export function WorkspacePage({ entity, project }: WorkspacePageProps) {
                   <span class="section-toggle">{collapsed ? "▶" : "▼"}</span>
                   System
                   <span class="section-count">{allSystemKeys.length}</span>
+                  {!collapsed && (
+                    <span class="section-layout-wrap" onClick={(e) => e.stopPropagation()}>
+                      <LayoutPicker
+                        compact
+                        value={layout}
+                        onChange={(l) => setSectionLayouts((prev) => ({ ...prev, [sectionKey]: l }))}
+                      />
+                    </span>
+                  )}
                 </div>
                 {!collapsed && (
-                  <div class="charts-grid">
-                    {allSystemKeys.map((key) => {
-                      const result = buildSystemChartSeries(key);
-                      if (!result) return null;
-                      return (
-                        <Chart
-                          key={key}
-                          title={key}
-                          series={result.series}
-                          seriesLinks={result.links}
-                          seriesColors={nameColorMap}
-                          highlightedLabel={hoveredRunName}
-                          onHighlight={setHoveredRunName}
-                          timeAxis
-                        />
-                      );
-                    })}
-                  </div>
+                  <>
+                    <div class="charts-grid" style={{ gridTemplateColumns: `repeat(${layout.cols}, 1fr)` }}>
+                      {pageKeys.map((key) => {
+                        const result = buildSystemChartSeries(key);
+                        if (!result) return null;
+                        return (
+                          <Chart
+                            key={key}
+                            title={key}
+                            series={result.series}
+                            seriesLinks={result.links}
+                            seriesColors={nameColorMap}
+                            highlightedLabel={hoveredRunName}
+                            onHighlight={setHoveredRunName}
+                            onHide={() => setHiddenCharts((prev) => new Set(prev).add(key))}
+                            timeAxis
+                          />
+                        );
+                      })}
+                    </div>
+                    {totalPages > 1 && (
+                      <div class="charts-pagination">
+                        <button disabled={clampedPage === 0} onClick={() => setSectionPages((p) => ({ ...p, [sectionKey]: clampedPage - 1 }))}>Prev</button>
+                        <span>{clampedPage + 1} / {totalPages}</span>
+                        <button disabled={clampedPage >= totalPages - 1} onClick={() => setSectionPages((p) => ({ ...p, [sectionKey]: clampedPage + 1 }))}>Next</button>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             );

@@ -10,5 +10,11 @@ ui/node_modules/
 ui/dist/
 ui/tsconfig.tsbuildinfo
 
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+sdk/.venv/
+
 # OS
 .DS_Store

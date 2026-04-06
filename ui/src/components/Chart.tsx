@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useRef, useMemo } from "preact/hooks";
 import uPlot from "uplot";
 import { COLORS } from "../constants";
 
@@ -22,6 +22,7 @@ interface ChartProps {
   seriesColors?: Record<string, string>;
   highlightedLabel?: string | null;
   onHighlight?: (label: string | null) => void;
+  onHide?: () => void;
   titleHighlight?: RegExp | null;
   timeAxis?: boolean;
 }
@@ -36,15 +37,28 @@ function renderHighlightedTitle(title: string, regex: RegExp | null | undefined)
   return <>{before}<mark class="metric-match">{matched}</mark>{after}</>;
 }
 
-export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors, highlightedLabel, onHighlight, titleHighlight, timeAxis }: ChartProps) {
+export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors, highlightedLabel, onHighlight, onHide, titleHighlight, timeAxis }: ChartProps) {
   const el = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
 
+  const seriesColorsRef = useRef(seriesColors);
+  seriesColorsRef.current = seriesColors;
+
   const colorForIndex = (i: number, label?: string) => {
-    if (label && seriesColors?.[label]) return seriesColors[label];
+    if (label && seriesColorsRef.current?.[label]) return seriesColorsRef.current[label];
     return COLORS[i % COLORS.length];
   };
 
+  // Stable key that changes only when the series structure or colors change
+  const seriesKey = useMemo(() => {
+    return series.slice(1).map((s) => {
+      const color = s.label && seriesColors?.[s.label] || "";
+      return (s.label || "") + ":" + color;
+    }).join("\0");
+  }, [series, seriesColors]);
+
+  // Create / recreate uPlot only when structure changes
   useEffect(() => {
     if (!el.current || !series || series.length < 2) return;
 
@@ -93,20 +107,41 @@ export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors
     return () => {
       if (chartRef.current) chartRef.current.destroy();
     };
-  }, [series, width, syncKey, seriesColors, timeAxis]);
+  }, [seriesKey, width, syncKey, timeAxis]);
 
-  // Apply focus when highlightedLabel changes
+  // Update data in-place when values change without recreating the chart
+  useEffect(() => {
+    const u = chartRef.current;
+    if (!u || !series || series.length < 2) return;
+    const alignedData = series.map((s) => s.data) as uPlot.AlignedData;
+    u.setData(alignedData, false);
+  }, [series]);
+
+  // Resize chart when container width changes (layout switch, window resize)
+  useEffect(() => {
+    const card = cardRef.current;
+    if (!card) return;
+    const ro = new ResizeObserver(() => {
+      const u = chartRef.current;
+      if (!u) return;
+      const newWidth = card.clientWidth - 32;
+      if (Math.abs(u.width - newWidth) > 1) {
+        u.setSize({ width: newWidth, height: u.height });
+      }
+    });
+    ro.observe(card);
+    return () => ro.disconnect();
+  }, []);
+
   useEffect(() => {
     const u = chartRef.current;
     if (!u || series.length < 2) return;
 
     if (!highlightedLabel) {
-      // Reset: unfocus all (restore full opacity)
       u.setSeries(null as unknown as number, { focus: true });
       return;
     }
 
-    // Find the 1-based series index matching the label
     const idx = series.findIndex((s, i) => i > 0 && s.label === highlightedLabel);
     if (idx > 0) {
       u.setSeries(idx, { focus: true });
@@ -117,8 +152,17 @@ export function Chart({ title, series, width, syncKey, seriesLinks, seriesColors
   seriesLinks?.forEach((sl) => linkMap.set(sl.label, sl.href));
 
   return (
-    <div class="chart-card">
-      <h3>{renderHighlightedTitle(title, titleHighlight)}</h3>
+    <div class="chart-card" ref={cardRef}>
+      <h3>
+        <span>{renderHighlightedTitle(title, titleHighlight)}</span>
+        {onHide && (
+          <button class="chart-hide-btn" onClick={onHide} title="Hide panel">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"/>
+            </svg>
+          </button>
+        )}
+      </h3>
       <div ref={el} />
       {series.length > 1 && (
         <div class="chart-legend">
